@@ -1,7 +1,7 @@
 import sqlite3
 import cv2
 import os
-from flask import Flask,request,render_template,redirect,session,url_for
+from flask import Flask,request,render_template,redirect,session,url_for,Response,jsonify
 from datetime import date
 from datetime import datetime
 import numpy as np
@@ -9,11 +9,12 @@ from sklearn.neighbors import KNeighborsClassifier
 import pandas as pd
 import joblib
 import time
+import threading
 # import db
 
 #VARIABLES
-MESSAGE = "WELCOME  " \
-          " Instruction: to register your attendence kindly click on 'a' on keyboard"
+MESSAGE = "WELCOME TO FAMILY RECOGNITION HELPER" \
+          " Click 'Who is this?' to identify a family member"
 
 #### Defining Flask App
 app = Flask(__name__)
@@ -29,16 +30,22 @@ try:
 except:
     cap = cv2.VideoCapture(0)
 
+# Global variables for camera streaming
+camera_active = False
+recognition_active = False
+current_frame = None
+recognized_person = None
+
 #### If these directories don't exist, create them
-if not os.path.isdir('Attendance'):
-    os.makedirs('Attendance')
+if not os.path.isdir('FamilyRecords'):
+    os.makedirs('FamilyRecords')
 if not os.path.isdir('static'):
     os.makedirs('static')
 if not os.path.isdir('static/faces'):
     os.makedirs('static/faces')
-if f'Attendance-{datetoday}.csv' not in os.listdir('Attendance'):
-    with open(f'Attendance/Attendance-{datetoday}.csv','w') as f:
-        f.write('Name,Roll,Time')
+if f'FamilyMembers-{datetoday}.csv' not in os.listdir('FamilyRecords'):
+    with open(f'FamilyRecords/FamilyMembers-{datetoday}.csv','w') as f:
+        f.write('Name,Relationship,DateAdded')
 
 #### get a number of total registered users
 
@@ -47,7 +54,7 @@ def totalreg():
 
 #### extract the face from an image
 def extract_faces(img):
-    if img!=[]:
+    if img is not None and img.size > 0:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         face_points = face_detector.detectMultiScale(gray, 1.3, 5)
         return face_points
@@ -84,6 +91,18 @@ def extract_attendance():
     l = len(df)
     return names,rolls,times,l
 
+#### get a list of family members
+def extract_family_members():
+    try:
+        df = pd.read_csv(f'FamilyRecords/FamilyMembers-{datetoday}.csv')
+        names = df['Name']
+        relationships = df['Relationship']
+        dates = df['DateAdded']
+        l = len(df)
+        return names, relationships, dates, l
+    except:
+        return [], [], [], 0
+
 #### Add Attendance of a specific user
 def add_attendance(name):
     username = name.split('_')[0]
@@ -102,11 +121,117 @@ def add_attendance(name):
 
 ################## ROUTING FUNCTIONS ##############################
 
+#### Camera streaming functions
+def generate_frames():
+    global current_frame, recognition_active, recognized_person, cap
+    
+    # Initialize camera if not already done
+    if cap is None or not cap.isOpened():
+        try:
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(1)
+        except:
+            cap = cv2.VideoCapture(0)
+    
+    while camera_active:
+        success, frame = cap.read()
+        if not success:
+            # Create a black frame with error message
+            frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(frame, 'Camera not available', (50, 240), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        else:
+            current_frame = frame.copy()
+            
+            if recognition_active:
+                # Detect faces
+                faces = extract_faces(frame)
+                
+                for (x, y, w, h) in faces:
+                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 3)
+                    
+                    # Try to identify the person
+                    face_roi = frame[y:y+h, x:x+w]
+                    face_resized = cv2.resize(face_roi, (50, 50))
+                    
+                    try:
+                        if os.path.exists('static/face_recognition_model.pkl'):
+                            identified_person = identify_face(face_resized.reshape(1, -1))[0]
+                            # Extract name from the identifier
+                            person_parts = identified_person.split('_')
+                            display_name = person_parts[0] if person_parts else identified_person
+                            
+                            cv2.putText(frame, f'{display_name}', (x + 6, y - 10), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                            recognized_person = display_name
+                        else:
+                            cv2.putText(frame, 'No trained model', (x + 6, y - 10), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            recognized_person = 'No trained faces'
+                    except Exception as e:
+                        cv2.putText(frame, 'Unknown', (x + 6, y - 10), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                        recognized_person = 'Unknown'
+                        print(f"Recognition error: {e}")
+            
+            # Add instruction text
+            if recognition_active:
+                cv2.putText(frame, 'Looking for faces...', (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+            else:
+                cv2.putText(frame, 'Camera ready - Click Start to recognize', (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        ret, buffer = cv2.imencode('.jpg', frame)
+        if ret:
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        else:
+            break
+
+@app.route('/video_feed')
+def video_feed():
+    global camera_active
+    camera_active = True
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/start_recognition')
+def start_recognition():
+    global recognition_active, recognized_person, camera_active
+    camera_active = True
+    recognition_active = True
+    recognized_person = None
+    
+    # Give some time for recognition to process
+    import time
+    time.sleep(3)
+    
+    return jsonify({
+        'person_name': recognized_person if recognized_person else 'No face detected',
+        'status': 'active'
+    })
+
+@app.route('/stop_recognition')
+def stop_recognition():
+    global recognition_active, camera_active
+    recognition_active = False
+    camera_active = False
+    return jsonify({'status': 'stopped'})
+
+@app.route('/get_recognition_status')
+def get_recognition_status():
+    global recognized_person, recognition_active
+    return jsonify({
+        'person_name': recognized_person,
+        'active': recognition_active
+    })
+
 #### Our main page
 @app.route('/')
 def home():
-    names,rolls,times,l = extract_attendance()
-    return render_template('home.html',names=names,rolls=rolls,times=times,l=l,totalreg=totalreg(),datetoday2=datetoday2, mess = MESSAGE)
+    return render_template('home_new.html', totalreg=totalreg(), datetoday2=datetoday2, mess=MESSAGE)
 
 
 #### This function will run when we click on Take Attendance Button
@@ -164,43 +289,60 @@ def start():
     return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(),
                            datetoday2=datetoday2, mess=MESSAGE)
 
-@app.route('/add',methods=['GET','POST'])
-def add():
-    newusername = request.form['newusername']
-    newuserid = request.form['newuserid']
-    userimagefolder = 'static/faces/'+newusername+'_'+str(newuserid)
+@app.route('/add_family',methods=['GET','POST'])
+def add_family():
+    familyMemberName = request.form['familyMemberName']
+    relationship = request.form['relationship']
+    
+    # Create unique identifier
+    import random
+    member_id = random.randint(1000, 9999)
+    userimagefolder = f'static/faces/{familyMemberName}_{relationship}_{member_id}'
+    
     if not os.path.isdir(userimagefolder):
         os.makedirs(userimagefolder)
-    cap = cv2.VideoCapture(0)
-    i,j = 0,0
-    while 1:
-        _,frame = cap.read()
+    
+    # Use a separate camera instance for capturing
+    capture_cap = cv2.VideoCapture(0)
+    i, j = 0, 0
+    
+    while i < 50:  # Capture exactly 50 images
+        ret, frame = capture_cap.read()
+        if not ret:
+            continue
+            
         faces = extract_faces(frame)
-        for (x,y,w,h) in faces:
-            cv2.rectangle(frame,(x, y), (x+w, y+h), (255, 0, 20), 2)
-            cv2.putText(frame,f'Images Captured: {i}/50',(30,30),cv2.FONT_HERSHEY_SIMPLEX,1,(255, 0, 20),2,cv2.LINE_AA)
-            if j%10==0:
-                name = newusername+'_'+str(i)+'.jpg'
-                cv2.imwrite(userimagefolder+'/'+name,frame[y:y+h,x:x+w])
-                i+=1
-            j+=1
-        if j==500:
+        for (x, y, w, h) in faces:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(frame, f'Capturing photos: {i}/50', (30, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(frame, f'Adding: {familyMemberName}', (30, 70), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(frame, 'Look at the camera. Press ESC to stop', (30, 110), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+            
+            if j % 10 == 0:  # Capture every 10th frame
+                name = f'{familyMemberName}_{i}.jpg'
+                cv2.imwrite(userimagefolder + '/' + name, frame[y:y+h, x:x+w])
+                i += 1
+            j += 1
+            
+        cv2.imshow(f'Adding Family Member: {familyMemberName}', frame)
+        if cv2.waitKey(1) == 27:  # ESC key
             break
-        cv2.imshow('Adding new User',frame)
-        if cv2.waitKey(1)==27:
-            break
-    cap.release()
+    
+    capture_cap.release()
     cv2.destroyAllWindows()
-    print('Training Model')
+    
+    # Record family member in CSV
+    with open(f'FamilyRecords/FamilyMembers-{datetoday}.csv', 'a') as f:
+        f.write(f'\n{familyMemberName},{relationship},{datetoday2}')
+    
+    print('Training Model with new family member...')
     train_model()
-    names,rolls,times,l = extract_attendance()
-    if totalreg() > 0 :
-        names, rolls, times, l = extract_attendance()
-        MESSAGE = 'User added Sucessfully'
-        print("message changed")
-        return render_template('home.html',names=names,rolls=rolls,times=times,l=l,totalreg=totalreg(),datetoday2=datetoday2, mess = MESSAGE)
-    else:
-        return redirect(url_for('home.html',names=names,rolls=rolls,times=times,l=l,totalreg=totalreg(),datetoday2=datetoday2))
+    
+    MESSAGE = f'Successfully added {familyMemberName} ({relationship}) to your family recognition system!'
+    return render_template('home_new.html', totalreg=totalreg(), datetoday2=datetoday2, mess=MESSAGE)
     # return render_template('home.html',names=names,rolls=rolls,times=times,l=l,totalreg=totalreg(),datetoday2=datetoday2)
 
 #### Our main function which runs the Flask App
