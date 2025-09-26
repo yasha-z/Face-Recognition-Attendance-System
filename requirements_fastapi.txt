@@ -1,0 +1,21 @@
+# FastAPI Family Recognition Backend Requirements
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Computer Vision & ML
+opencv-python==4.7.0.72
+numpy==1.24.2
+scikit-learn==1.2.2
+pandas==1.5.3
+joblib==1.2.0
+
+# Image Processing
+Pillow==9.4.0
+
+# Optional: For better face recognition (if you want to upgrade later)
+# dlib==19.24.1
+# face-recognition==1.3.0
+# face-recognition-models==0.3.0
