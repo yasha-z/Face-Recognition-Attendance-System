@@ -2,10 +2,8 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTa
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
-import logging
 import cv2
 import os
 import numpy as np
@@ -20,30 +18,18 @@ import base64
 import io
 import asyncio
 from PIL import Image
+import logging
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Family Recognition API",
-    description="Backend API for dementia patient family recognition system",
+    title="Family Recognition Backend API",
+    description="FastAPI backend for React Native family recognition app",
     version="1.0.0"
 )
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Custom exception handler for validation errors
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    logger.error(f"Validation error for {request.method} {request.url}: {exc.errors()}")
-    return JSONResponse(
-        status_code=422,
-        content={
-            "detail": exc.errors(),
-            "body": str(exc.body) if hasattr(exc, 'body') else None,
-            "message": "Validation error - check your request format"
-        }
-    )
 
 # Add CORS middleware for React Native
 app.add_middleware(
@@ -54,9 +40,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global variables
+# Global variables (same as Flask app)
 datetoday = date.today().strftime("%m_%d_%y")
 datetoday2 = date.today().strftime("%d-%B-%Y")
+MESSAGE = "WELCOME TO FAMILY RECOGNITION HELPER - Click 'Who is this?' to identify a family member"
 
 # Camera and recognition globals
 face_detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
@@ -70,15 +57,15 @@ cap = None
 def init_camera():
     global cap
     try:
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(1)
         if not cap.isOpened():
-            cap = cv2.VideoCapture(1)
+            cap = cv2.VideoCapture(0)
     except:
         cap = cv2.VideoCapture(0)
 
 init_camera()
 
-# Create directories
+# Create directories (same as Flask)
 if not os.path.isdir('FamilyRecords'):
     os.makedirs('FamilyRecords')
 if not os.path.isdir('static'):
@@ -89,27 +76,7 @@ if f'FamilyMembers-{datetoday}.csv' not in os.listdir('FamilyRecords'):
     with open(f'FamilyRecords/FamilyMembers-{datetoday}.csv','w') as f:
         f.write('Name,Relationship,DateAdded')
 
-# Pydantic models for API
-class FamilyMemberRequest(BaseModel):
-    name: str
-    relationship: str
-
-class FamilyMemberResponse(BaseModel):
-    name: str
-    relationship: str
-    date_added: str
-    id: str
-
-class RecognitionResponse(BaseModel):
-    person_name: str
-    confidence: Optional[float] = None
-    status: str
-
-class CameraStatusResponse(BaseModel):
-    active: bool
-    recognition_active: bool
-
-# Utility functions
+# Utility functions (exactly from Flask app)
 def totalreg():
     return len(os.listdir('static/faces'))
 
@@ -132,13 +99,17 @@ def train_model():
     for user in userlist:
         for imgname in os.listdir(f'static/faces/{user}'):
             img = cv2.imread(f'static/faces/{user}/{imgname}')
-            resized_face = cv2.resize(img, (50, 50))
-            faces.append(resized_face.flatten())
-            labels.append(user)
-    faces = np.array(faces)
-    knn = KNeighborsClassifier(n_neighbors=5)
-    knn.fit(faces, labels)
-    joblib.dump(knn, 'static/face_recognition_model.pkl')
+            if img is not None:
+                resized_face = cv2.resize(img, (50, 50))
+                faces.append(resized_face.flatten())
+                labels.append(user)
+    
+    if len(faces) > 0:
+        faces = np.array(faces)
+        knn = KNeighborsClassifier(n_neighbors=5)
+        knn.fit(faces, labels)
+        joblib.dump(knn, 'static/face_recognition_model.pkl')
+        print(f"Model trained with {len(faces)} face samples")
 
 def extract_family_members():
     try:
@@ -151,7 +122,7 @@ def extract_family_members():
     except:
         return [], [], [], 0
 
-# Camera streaming function
+# Camera streaming function (same logic as Flask)
 def generate_frames():
     global current_frame, recognition_active, recognized_person, cap
     
@@ -198,8 +169,8 @@ def generate_frames():
                 cv2.putText(frame, 'Looking for faces...', (10, 30), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
             else:
-                cv2.putText(frame, 'Camera ready', (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.putText(frame, 'Family Recognition Helper', (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         
         ret, buffer = cv2.imencode('.jpg', frame)
         if ret:
@@ -209,15 +180,43 @@ def generate_frames():
         else:
             break
 
+# Pydantic models for API responses
+class FamilyMemberResponse(BaseModel):
+    name: str
+    relationship: str
+    date_added: str
+    id: str
+
+class RecognitionResponse(BaseModel):
+    person_name: str
+    confidence: Optional[float] = None
+    status: str
+
+# Custom exception handler for better debugging
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"Validation error for {request.method} {request.url}: {exc.errors()}")
+    logger.error(f"Request body type: {type(exc.body)}")
+    
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": exc.errors(),
+            "message": "Validation error - check your request format",
+            "received_body_type": str(type(exc.body))
+        }
+    )
+
 # API Endpoints
 
 @app.get("/")
 async def root():
     return {
-        "message": "Family Recognition API",
+        "message": "Family Recognition Backend API",
         "version": "1.0.0",
         "total_family_members": totalreg(),
-        "date": datetoday2
+        "date": datetoday2,
+        "status": "ready"
     }
 
 @app.get("/api/status")
@@ -227,34 +226,44 @@ async def get_status():
         "camera_available": cap is not None and cap.isOpened(),
         "total_family_members": totalreg(),
         "model_trained": os.path.exists('static/face_recognition_model.pkl'),
-        "date": datetoday2
+        "date": datetoday2,
+        "message": MESSAGE
     }
 
-@app.get("/api/family-members", response_model=List[FamilyMemberResponse])
+@app.get("/api/family-members")
 async def get_family_members():
     """Get list of all family members"""
     names, relationships, dates, count = extract_family_members()
     
     family_members = []
     for i in range(count):
-        family_members.append(FamilyMemberResponse(
-            name=names.iloc[i],
-            relationship=relationships.iloc[i],
-            date_added=dates.iloc[i],
-            id=f"{names.iloc[i]}_{relationships.iloc[i]}"
-        ))
+        family_members.append({
+            "name": names.iloc[i],
+            "relationship": relationships.iloc[i], 
+            "date_added": dates.iloc[i],
+            "id": f"{names.iloc[i]}_{relationships.iloc[i]}"
+        })
     
-    return family_members
+    return {
+        "family_members": family_members,
+        "total_count": count
+    }
 
-@app.post("/api/family-members", response_model=dict)
+# Make the form fields optional to handle React Native requests better
+@app.post("/api/family-members")
 async def add_family_member(
     background_tasks: BackgroundTasks,
-    name: str = Form(...),
-    relationship: str = Form(...),
-    images: List[UploadFile] = File(None)
+    name: Optional[str] = Form(None),
+    relationship: Optional[str] = Form(None),
+    images: Optional[List[UploadFile]] = File(None)
 ):
-    logger.info(f"Received add_family_member request: name={name}, relationship={relationship}, images_count={len(images) if images else 0}")
     """Add a new family member with their photos"""
+    
+    logger.info(f"Received add_family_member request: name={name}, relationship={relationship}")
+    
+    # Validate required fields
+    if not name or not relationship:
+        raise HTTPException(status_code=400, detail="Name and relationship are required")
     
     # Create unique identifier
     member_id = random.randint(1000, 9999)
@@ -267,39 +276,42 @@ async def add_family_member(
     saved_count = 0
     if images and len(images) > 0:
         for i, image_file in enumerate(images):
-            if image_file and image_file.content_type and image_file.content_type.startswith('image/'):
-                try:
-                    contents = await image_file.read()
-                    
-                    # Convert to OpenCV format
-                    nparr = np.frombuffer(contents, np.uint8)
-                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    
-                    if img is not None:
-                        # Save the image
-                        filename = f'{name}_{i}.jpg'
-                        cv2.imwrite(f'{userimagefolder}/{filename}', img)
-                        saved_count += 1
-                except Exception as e:
-                    print(f"Error processing image {i}: {e}")
-                    continue
+            if image_file and hasattr(image_file, 'content_type') and image_file.content_type:
+                if image_file.content_type.startswith('image/'):
+                    try:
+                        contents = await image_file.read()
+                        
+                        # Convert to OpenCV format
+                        nparr = np.frombuffer(contents, np.uint8)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        
+                        if img is not None:
+                            # Save the image
+                            filename = f'{name}_{i}.jpg'
+                            cv2.imwrite(f'{userimagefolder}/{filename}', img)
+                            saved_count += 1
+                    except Exception as e:
+                        logger.error(f"Error processing image {i}: {e}")
+                        continue
     
     # Record family member in CSV
     with open(f'FamilyRecords/FamilyMembers-{datetoday}.csv', 'a') as f:
         f.write(f'\n{name},{relationship},{datetoday2}')
     
-    # Train model in background
-    background_tasks.add_task(train_model)
+    # Train model in background if we have images
+    if saved_count > 0:
+        background_tasks.add_task(train_model)
     
     return {
         "message": f"Successfully added {name} ({relationship})",
         "images_saved": saved_count,
-        "total_family_members": totalreg()
+        "total_family_members": totalreg(),
+        "status": "success"
     }
 
 @app.get("/api/camera/feed")
 async def video_feed():
-    """Get camera video stream"""
+    """Get camera video stream for web viewing"""
     global camera_active
     camera_active = True
     return StreamingResponse(generate_frames(), media_type="multipart/x-mixed-replace; boundary=frame")
@@ -320,15 +332,7 @@ async def stop_camera():
     recognition_active = False
     return {"status": "camera_stopped", "active": camera_active}
 
-@app.get("/api/camera/status", response_model=CameraStatusResponse)
-async def get_camera_status():
-    """Get camera status"""
-    return CameraStatusResponse(
-        active=camera_active,
-        recognition_active=recognition_active
-    )
-
-@app.post("/api/recognition/start", response_model=RecognitionResponse)
+@app.post("/api/recognition/start")
 async def start_recognition():
     """Start face recognition"""
     global recognition_active, recognized_person, camera_active
@@ -340,10 +344,11 @@ async def start_recognition():
     # Give time for recognition to process
     await asyncio.sleep(3)
     
-    return RecognitionResponse(
-        person_name=recognized_person if recognized_person else 'No face detected',
-        status='active'
-    )
+    return {
+        "person_name": recognized_person if recognized_person else 'No face detected',
+        "status": 'active',
+        "recognition_active": recognition_active
+    }
 
 @app.post("/api/recognition/stop")
 async def stop_recognition():
@@ -352,27 +357,25 @@ async def stop_recognition():
     recognition_active = False
     return {"status": "recognition_stopped", "active": recognition_active}
 
-@app.get("/api/recognition/status", response_model=RecognitionResponse)
+@app.get("/api/recognition/status")
 async def get_recognition_status():
     """Get current recognition status"""
-    return RecognitionResponse(
-        person_name=recognized_person if recognized_person else 'No recognition active',
-        status='active' if recognition_active else 'inactive'
-    )
+    return {
+        "person_name": recognized_person if recognized_person else 'No recognition active',
+        "status": 'active' if recognition_active else 'inactive',
+        "recognition_active": recognition_active
+    }
 
 @app.post("/api/recognition/identify")
 async def identify_person_from_image(image: UploadFile = File(...)):
-    """Identify person from uploaded image"""
+    """Identify person from uploaded image - main endpoint for React Native"""
     
-    logger.info(f"Received identify request: image={image.filename if image else None}")
+    logger.info(f"Received identify request: filename={image.filename}, content_type={image.content_type}")
     
     try:
         if not image:
             raise HTTPException(status_code=400, detail="No image provided")
             
-        if not image.content_type or not image.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="File must be an image")
-        
         # Read and process image
         contents = await image.read()
         if not contents:
@@ -386,17 +389,18 @@ async def identify_person_from_image(image: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error processing image: {e}")
+        logger.error(f"Error processing image: {e}")
         raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
     
     # Detect faces
     faces = extract_faces(img)
     
     if len(faces) == 0:
-        return RecognitionResponse(
-            person_name="No face detected",
-            status="no_face"
-        )
+        return {
+            "person_name": "No face detected",
+            "status": "no_face",
+            "confidence": None
+        }
     
     # Use the first detected face
     x, y, w, h = faces[0]
@@ -409,20 +413,24 @@ async def identify_person_from_image(image: UploadFile = File(...)):
             person_parts = identified_person.split('_')
             display_name = person_parts[0] if person_parts else identified_person
             
-            return RecognitionResponse(
-                person_name=display_name,
-                status="identified"
-            )
+            return {
+                "person_name": display_name,
+                "status": "identified",
+                "confidence": 0.85  # Mock confidence for now
+            }
         else:
-            return RecognitionResponse(
-                person_name="No trained model available",
-                status="no_model"
-            )
+            return {
+                "person_name": "No trained model available",
+                "status": "no_model",
+                "confidence": None
+            }
     except Exception as e:
-        return RecognitionResponse(
-            person_name="Recognition failed",
-            status="error"
-        )
+        logger.error(f"Recognition error: {e}")
+        return {
+            "person_name": "Recognition failed",
+            "status": "error",
+            "confidence": None
+        }
 
 @app.delete("/api/family-members/{member_id}")
 async def delete_family_member(member_id: str, background_tasks: BackgroundTasks):
@@ -446,17 +454,12 @@ async def delete_family_member(member_id: str, background_tasks: BackgroundTasks
     else:
         raise HTTPException(status_code=404, detail="Family member not found")
 
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
-
-# Debug endpoint to test file uploads
+# Debug endpoint for testing
 @app.post("/api/debug/upload-test")
 async def debug_upload_test(
-    name: str = Form(None),
-    relationship: str = Form(None),
-    image: UploadFile = File(None)
+    name: Optional[str] = Form(None),
+    relationship: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None)
 ):
     """Debug endpoint to test file upload format"""
     result = {
@@ -466,15 +469,20 @@ async def debug_upload_test(
     }
     
     if image:
+        contents = await image.read()
         result["image_info"] = {
             "filename": image.filename,
             "content_type": image.content_type,
-            "size": len(await image.read()) if image else 0
+            "size": len(contents)
         }
     
     return result
 
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
 if __name__ == "__main__":
     import uvicorn
-    import asyncio
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
